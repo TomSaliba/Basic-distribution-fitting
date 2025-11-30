@@ -1,8 +1,9 @@
-################################################################################
+###############################################################################
 ## SHINY APP — CLAIM SEVERITY DISTRIBUTION FITTING
-## Fits: Gamma, Lognormal, Normal, Pareto (Type II / Lomax)
-## Includes: AIC/BIC dashboard, QQ plots, PDF plots, styled parameter table
-################################################################################
+## Distributions: Gamma, Lognormal, Normal, Pareto Type II (Lomax)
+## Includes: AIC/BIC dashboard, QQ plots, PDF plots, parameter table
+## FIXED FOR DEPLOYMENT — Includes correct custom distribution registration
+###############################################################################
 
 library(shiny)
 library(fitdistrplus)
@@ -10,9 +11,9 @@ library(MASS)
 library(plotly)
 library(reactable)
 
-################################################################################
-## Pareto (Type II / Lomax) distribution definitions
-################################################################################
+###############################################################################
+## CUSTOM PARETO-II (LOMAX) DISTRIBUTION + REGISTRATION FOR FITDIST
+###############################################################################
 
 dparetoL <- function(x, shape, scale) {
   ifelse(x >= 0,
@@ -34,9 +35,23 @@ rparetoL <- function(n, shape, scale) {
   qparetoL(runif(n), shape, scale)
 }
 
-################################################################################
+## Register with fitdistrplus — **critical fix**
+paretoL_dist <- list(
+  densfun = dparetoL,
+  pfun    = pparetoL,
+  qfun    = qparetoL,
+  rfun    = rparetoL,
+  start   = function(x) {
+    list(
+      shape = 1.5,
+      scale = median(x) / 2
+    )
+  }
+)
+
+###############################################################################
 ## UI
-################################################################################
+###############################################################################
 
 ui <- fluidPage(
   titlePanel("Insurance Severity Distribution Fitting"),
@@ -47,107 +62,87 @@ ui <- fluidPage(
       numericInput("nsim", "Or simulate N lognormal claims:", 2000),
       actionButton("go", "Run Fitting"),
       hr(),
-      helpText("Fits Gamma, Lognormal, Normal, and Pareto Type II distributions.")
+      helpText("Fits Gamma, Lognormal, Normal, and Pareto Type II (Lomax) distributions.")
     ),
     
     mainPanel(
       tabsetPanel(
-        
-        # Tab 1 — Data summary
-        tabPanel("Data Summary",
-                 verbatimTextOutput("summary")
-        ),
-        
-        # Tab 2 — Fitted parameters (tidy table)
-        tabPanel("Fitted Parameters",
-                 h4("Fitted Distribution Parameters"),
-                 reactableOutput("params_table")
-        ),
-        
-        # Tab 3 — AIC/BIC dashboard
-        tabPanel("Goodness of Fit (AIC/BIC)",
+        tabPanel("Data Summary", verbatimTextOutput("summary")),
+        tabPanel("Fitted Parameters", h4("Fitted Distribution Parameters"), reactableOutput("params_table")),
+        tabPanel("Goodness of Fit (AIC/BIC)", 
                  plotlyOutput("aic_table"),
                  plotlyOutput("aic_bar"),
-                 plotlyOutput("bic_bar")
-        ),
-        
-        # Tab 4 — Interactive QQ plots
+                 plotlyOutput("bic_bar")),
         tabPanel("Interactive QQ Plots",
                  h4("Gamma"), plotlyOutput("qq_gamma"),
                  h4("Lognormal"), plotlyOutput("qq_lognorm"),
                  h4("Normal"), plotlyOutput("qq_norm"),
-                 h4("Pareto (Type II)"), plotlyOutput("qq_pareto")
-        ),
-        
-        # Tab 5 — PDF comparison
+                 h4("Pareto (Type II)"), plotlyOutput("qq_pareto")),
         tabPanel("PDF Plots",
                  h4("PDF Comparison"),
-                 plotlyOutput("pdf_plot")
-        )
+                 plotlyOutput("pdf_plot"))
       )
     )
   )
 )
 
-################################################################################
+###############################################################################
 ## SERVER
-################################################################################
+###############################################################################
 
 server <- function(input, output, session) {
   
-  ##############################################################################
+  ###########################################################################
   ## CLAIM DATA INPUT
-  ##############################################################################
+  ###########################################################################
   
   claim_data <- eventReactive(input$go, {
     if (!is.null(input$file)) {
-      df <- read.csv(input$file$datapath)
+      df <- tryCatch(read.csv(input$file$datapath), error = function(e) NULL)
+      validate(need(!is.null(df), "Error reading CSV file."))
       x <- df[[1]]
-      x <- x[x > 0]
     } else {
       x <- abs(rlnorm(input$nsim, meanlog = 9, sdlog = 1))
     }
+    
+    x <- x[x > 0]   # safety filter
+    validate(need(length(x) > 10, "Not enough positive values to fit distributions."))
     x
   })
   
-  ##############################################################################
+  ###########################################################################
   ## FIT DISTRIBUTIONS
-  ##############################################################################
+  ###########################################################################
   
   fits <- eventReactive(input$go, {
     x <- claim_data()
     
-    fit_gamma <- fitdist(x, "gamma", method = "mle")
-    fit_lognormal <- fitdist(x, "lnorm", method = "mle")
-    fit_normal <- fitdist(x, "norm", method = "mle")
-    fit_pareto <- fitdist(
-      x, "paretoL",
-      start = list(shape = 1.5, scale = median(x) / 2),
-      method = "mle"
-    )
+    fit_gamma     <- fitdist(x, "gamma")
+    fit_lognorm   <- fitdist(x, "lnorm")
+    fit_normal    <- fitdist(x, "norm")
+    fit_pareto    <- fitdist(x, "paretoL", custom.dist = paretoL_dist)
     
     list(
-      gamma = fit_gamma,
-      lognormal = fit_lognormal,
-      normal = fit_normal,
-      pareto = fit_pareto
+      gamma     = fit_gamma,
+      lognormal = fit_lognorm,
+      normal    = fit_normal,
+      pareto    = fit_pareto
     )
   })
   
-  ##############################################################################
+  ###########################################################################
   ## OUTPUT: DATA SUMMARY
-  ##############################################################################
+  ###########################################################################
   
   output$summary <- renderPrint({
     summary(claim_data())
   })
   
-  ##############################################################################
-  ## OUTPUT: FITTED PARAMETERS TABLE (reactable)
-  ##############################################################################
+  ###########################################################################
+  ## OUTPUT: PARAMETER TABLE
+  ###########################################################################
   
   output$params_table <- renderReactable({
-    
     f <- fits()
     
     params_df <- data.frame(
@@ -174,31 +169,28 @@ server <- function(input, output, session) {
       bordered = TRUE,
       resizable = TRUE,
       defaultColDef = colDef(align = "center"),
-      columns = list(
-        Distribution = colDef(name = "Distribution", align = "left")
-      )
+      columns = list(Distribution = colDef(align = "left"))
     )
   })
   
-  ##############################################################################
-  ## AIC/BIC DASHBOARD
-  ##############################################################################
+  ###########################################################################
+  ## AIC/BIC TABLE + BAR CHARTS
+  ###########################################################################
   
   output$aic_table <- renderPlotly({
     f <- fits()
-    aic_df <- data.frame(
+    
+    df <- data.frame(
       Distribution = c("Gamma", "Lognormal", "Normal", "Pareto"),
       AIC = c(f$gamma$aic, f$lognormal$aic, f$normal$aic, f$pareto$aic),
       BIC = c(f$gamma$bic, f$lognormal$bic, f$normal$bic, f$pareto$bic)
     )
     
-    plot_ly(
-      type = "table",
-      header = list(values = names(aic_df),
-                    fill = list(color = "#4a90e2"),
-                    font = list(color = "white")),
-      cells = list(values = t(aic_df))
-    )
+    plot_ly(type = "table",
+            header = list(values = names(df),
+                          fill = list(color = "#4a90e2"),
+                          font = list(color = "white")),
+            cells = list(values = t(df)))
   })
   
   output$aic_bar <- renderPlotly({
@@ -221,14 +213,14 @@ server <- function(input, output, session) {
       layout(title = "BIC Comparison")
   })
   
-  ##############################################################################
-  ## INTERACTIVE QQ PLOTS
-  ##############################################################################
+  ###########################################################################
+  ## GENERIC QQ-PLOT BUILDER
+  ###########################################################################
   
-  make_qq_plot <- function(x, fit, qdist, params) {
+  make_qq_plot <- function(x, qfun, params) {
     probs <- ppoints(length(x))
     sorted_data <- sort(x)
-    q_theo <- do.call(qdist, c(list(probs), params))
+    q_theo <- do.call(qfun, c(list(probs), params))
     
     plot_ly() %>%
       add_markers(x = q_theo, y = sorted_data) %>%
@@ -240,36 +232,32 @@ server <- function(input, output, session) {
   }
   
   output$qq_gamma <- renderPlotly({
-    x <- claim_data()
-    fit <- fits()$gamma
-    make_qq_plot(x, fit, qgamma,
-                 list(shape = fit$estimate["shape"], rate = fit$estimate["rate"]))
+    f <- fits()$gamma
+    make_qq_plot(claim_data(), qgamma,
+                 list(shape = f$estimate["shape"], rate = f$estimate["rate"]))
   })
   
   output$qq_lognorm <- renderPlotly({
-    x <- claim_data()
-    fit <- fits()$lognormal
-    make_qq_plot(x, fit, qlnorm,
-                 list(meanlog = fit$estimate["meanlog"], sdlog = fit$estimate["sdlog"]))
+    f <- fits()$lognormal
+    make_qq_plot(claim_data(), qlnorm,
+                 list(meanlog = f$estimate["meanlog"], sdlog = f$estimate["sdlog"]))
   })
   
   output$qq_norm <- renderPlotly({
-    x <- claim_data()
-    fit <- fits()$normal
-    make_qq_plot(x, fit, qnorm,
-                 list(mean = fit$estimate["mean"], sd = fit$estimate["sd"]))
+    f <- fits()$normal
+    make_qq_plot(claim_data(), qnorm,
+                 list(mean = f$estimate["mean"], sd = f$estimate["sd"]))
   })
   
   output$qq_pareto <- renderPlotly({
-    x <- claim_data()
-    fit <- fits()$pareto
-    make_qq_plot(x, fit, qparetoL,
-                 list(shape = fit$estimate["shape"], scale = fit$estimate["scale"]))
+    f <- fits()$pareto
+    make_qq_plot(claim_data(), qparetoL,
+                 list(shape = f$estimate["shape"], scale = f$estimate["scale"]))
   })
   
-  ##############################################################################
+  ###########################################################################
   ## PDF COMPARISON PLOT
-  ##############################################################################
+  ###########################################################################
   
   output$pdf_plot <- renderPlotly({
     x <- claim_data()
@@ -277,37 +265,23 @@ server <- function(input, output, session) {
     
     xgrid <- seq(min(x), max(x), length.out = 400)
     
-    pdf_gamma <- dgamma(xgrid,
-                        shape = f$gamma$estimate["shape"],
-                        rate  = f$gamma$estimate["rate"])
-    
-    pdf_lognorm <- dlnorm(xgrid,
-                          meanlog = f$lognormal$estimate["meanlog"],
-                          sdlog   = f$lognormal$estimate["sdlog"])
-    
-    pdf_norm <- dnorm(xgrid,
-                      mean = f$normal$estimate["mean"],
-                      sd   = f$normal$estimate["sd"])
-    
-    pdf_pareto <- dparetoL(xgrid,
-                           shape = f$pareto$estimate["shape"],
-                           scale = f$pareto$estimate["scale"])
+    pdf_gamma <- dgamma(xgrid, shape = f$gamma$estimate["shape"], rate = f$gamma$estimate["rate"])
+    pdf_lognorm <- dlnorm(xgrid, meanlog = f$lognormal$estimate["meanlog"], sdlog = f$lognormal$estimate["sdlog"])
+    pdf_norm <- dnorm(xgrid, mean = f$normal$estimate["mean"], sd = f$normal$estimate["sd"])
+    pdf_pareto <- dparetoL(xgrid, shape = f$pareto$estimate["shape"], scale = f$pareto$estimate["scale"])
     
     plot_ly(x = xgrid, y = pdf_gamma, type = "scatter", mode = "lines", name = "Gamma") %>%
       add_lines(y = pdf_lognorm, name = "Lognormal") %>%
       add_lines(y = pdf_norm, name = "Normal") %>%
       add_lines(y = pdf_pareto, name = "Pareto (Type II)") %>%
-      layout(
-        title = "PDF Comparison",
-        xaxis = list(title = "Claim Cost"),
-        yaxis = list(title = "Density")
-      )
+      layout(title = "PDF Comparison",
+             xaxis = list(title = "Claim Cost"),
+             yaxis = list(title = "Density"))
   })
 }
 
-################################################################################
+###############################################################################
 ## RUN APP
-################################################################################
+###############################################################################
 
 shinyApp(ui, server)
-
